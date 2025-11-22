@@ -8,21 +8,36 @@ export const initAstrology = () => {
         swePromise = (async () => {
             console.log("Initializing SwissEph...");
 
-            const swe = new SwissEph({
-                locateFile: (path, scriptDirectory) => {
-                    console.log(`locateFile called for: ${path}, scriptDirectory: ${scriptDirectory}`);
-                    const origin = typeof window !== 'undefined' ? window.location.origin : '';
-                    if (path.endsWith('.wasm')) return `${origin}/swisseph.wasm`;
-                    if (path.endsWith('.data')) return `${origin}/swisseph.data`;
-                    return path;
-                },
-                print: (text) => console.log("SwissEph stdout:", text),
-                printErr: (text) => console.error("SwissEph stderr:", text),
-                onAbort: (what) => console.error("SwissEph aborted:", what),
-            });
-            await swe.initSwissEph();
-            console.log("SwissEph initialized.");
-            return swe;
+            const origin = typeof window !== 'undefined' ? window.location.origin : '';
+            const wasmUrl = `${origin}/swisseph.wasm`;
+
+            console.log(`Fetching WASM from: ${wasmUrl}`);
+            try {
+                const response = await fetch(wasmUrl);
+                if (!response.ok) {
+                    throw new Error(`Failed to fetch WASM: ${response.status} ${response.statusText}`);
+                }
+                const wasmBinary = await response.arrayBuffer();
+                console.log("WASM fetched successfully, size:", wasmBinary.byteLength);
+
+                const swe = new SwissEph({
+                    wasmBinary,
+                    locateFile: (path, scriptDirectory) => {
+                        console.log(`locateFile called for: ${path}, scriptDirectory: ${scriptDirectory}`);
+                        if (path.endsWith('.data')) return `${origin}/swisseph.data`;
+                        return path;
+                    },
+                    print: (text) => console.log("SwissEph stdout:", text),
+                    printErr: (text) => console.error("SwissEph stderr:", text),
+                    onAbort: (what) => console.error("SwissEph aborted:", what),
+                });
+                await swe.initSwissEph();
+                console.log("SwissEph initialized.");
+                return swe;
+            } catch (error) {
+                console.error("Failed to initialize SwissEph:", error);
+                throw error;
+            }
         })();
     }
     return swePromise;
