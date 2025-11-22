@@ -7,7 +7,13 @@ export const initAstrology = () => {
     if (!swePromise) {
         swePromise = (async () => {
             console.log("Initializing SwissEph...");
-            const swe = new SwissEph();
+            const swe = new SwissEph({
+                locateFile: (path) => {
+                    if (path.endsWith('.wasm')) return '/swisseph.wasm';
+                    if (path.endsWith('.data')) return '/swisseph.data';
+                    return path;
+                }
+            });
             await swe.initSwissEph();
             console.log("SwissEph initialized.");
             return swe;
