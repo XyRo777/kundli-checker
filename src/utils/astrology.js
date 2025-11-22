@@ -1,47 +1,50 @@
 import SwissEph from 'swisseph-wasm';
 
+// Vite resolves these to the final URLs in /dist
+const swissephWasmUrl = new URL('../assets/swisseph.wasm', import.meta.url).href;
+const swissephDataUrl = new URL('../assets/swisseph.data', import.meta.url).href;
+
 // Singleton promise to ensure initialization happens only once
 let swePromise = null;
 
 export const initAstrology = () => {
     if (!swePromise) {
         swePromise = (async () => {
-            console.log("Initializing SwissEph...");
+            console.log('Initializing SwissEph...');
+            console.log('WASM URL:', swissephWasmUrl);
+            console.log('DATA URL:', swissephDataUrl);
 
-            const origin = typeof window !== 'undefined' ? window.location.origin : '';
-            const wasmUrl = `${origin}/swisseph.wasm`;
-
-            console.log(`Fetching WASM from: ${wasmUrl}`);
             try {
-                const response = await fetch(wasmUrl);
-                if (!response.ok) {
-                    throw new Error(`Failed to fetch WASM: ${response.status} ${response.statusText}`);
-                }
-                const wasmBinary = await response.arrayBuffer();
-                console.log("WASM fetched successfully, size:", wasmBinary.byteLength);
-
                 const swe = new SwissEph({
-                    wasmBinary,
+                    // Tell the runtime where to find .wasm and .data
                     locateFile: (path, scriptDirectory) => {
-                        console.log(`locateFile called for: ${path}, scriptDirectory: ${scriptDirectory}`);
-                        if (path.endsWith('.data')) return `${origin}/swisseph.data`;
+                        console.log('locateFile called for:', path, 'scriptDirectory:', scriptDirectory);
+
+                        if (path.endsWith('.wasm')) {
+                            return swissephWasmUrl;
+                        }
+                        if (path.endsWith('.data')) {
+                            return swissephDataUrl;
+                        }
                         return path;
                     },
-                    print: (text) => console.log("SwissEph stdout:", text),
-                    printErr: (text) => console.error("SwissEph stderr:", text),
-                    onAbort: (what) => console.error("SwissEph aborted:", what),
+                    print: (text) => console.log('SwissEph stdout:', text),
+                    printErr: (text) => console.error('SwissEph stderr:', text),
+                    onAbort: (what) => console.error('SwissEph aborted:', what),
                 });
+
                 await swe.initSwissEph();
-                console.log("SwissEph initialized.");
+                console.log('SwissEph initialized.');
                 return swe;
             } catch (error) {
-                console.error("Failed to initialize SwissEph:", error);
+                console.error('Failed to initialize SwissEph:', error);
                 throw error;
             }
         })();
     }
     return swePromise;
 };
+
 
 export const calculatePlanetaryPositions = async (date, time, timezone, lat, lon) => {
     const swe = await initAstrology();
@@ -95,7 +98,10 @@ export const calculatePlanetaryPositions = async (date, time, timezone, lat, lon
     const SEFLG_SIDEREAL = 64 * 1024;
     const SEFLG_SPEED = 256;
 
-    let flags = (swe.SEFLG_SPEED || SEFLG_SPEED) | (swe.SEFLG_MOSEPH || SEFLG_MOSEPH) | (swe.SEFLG_SIDEREAL || SEFLG_SIDEREAL);
+    let flags =
+        (swe.SEFLG_SPEED || SEFLG_SPEED) |
+        (swe.SEFLG_MOSEPH || SEFLG_MOSEPH) |
+        (swe.SEFLG_SIDEREAL || SEFLG_SIDEREAL);
 
     for (const p of planets) {
         let planetId = p.id;
@@ -137,68 +143,56 @@ export const calculatePlanetaryPositions = async (date, time, timezone, lat, lon
         });
     }
 
-    // Calculate Ascendant Manually
-    // Because swe.houses is broken in this WASM wrapper (returns 0 instead of data)
+    // === Manual Ascendant Calculation ===
     let ascendant = 0;
     try {
-        // 1. Get Obliquity (Epsilon)
-        // SE_ECL_NUT = -1
         const SE_ECL_NUT = -1;
-        const ecl = swe.calc_ut(jd, SE_ECL_NUT, flags); // Use same flags (Sidereal?) No, Ecliptic is tropical usually? 
-        // Actually for Ascendant calculation we need True Obliquity of Date.
-        // calc_ut with SE_ECL_NUT returns [eps_true, eps_mean, dpsi, deps]
-        // We should probably use Tropical for the triangle calculation, then convert Ascendant to Sidereal?
-        // Or calculate Ascendant in Tropical then subtract Ayanamsa?
-        // Yes, standard practice: Calculate Tropical Ascendant, then subtract Ayanamsa.
 
-        // Calculate Tropical Obliquity
-        const tropFlags = (swe.SEFLG_SPEED || SEFLG_SPEED) | (swe.SEFLG_MOSEPH || SEFLG_MOSEPH); // No Sidereal flag
+        // Tropical obliquity
+        const SEFLG_MOSEPH_ONLY = swe.SEFLG_MOSEPH || SEFLG_MOSEPH;
+        const SEFLG_SPEED_ONLY = swe.SEFLG_SPEED || SEFLG_SPEED;
+        const tropFlags = SEFLG_MOSEPH_ONLY | SEFLG_SPEED_ONLY;
+
         const eclTrop = swe.calc_ut(jd, SE_ECL_NUT, tropFlags);
         const eps = eclTrop[0];
 
-        // 2. Get Sidereal Time (Greenwich)
         const gmst = swe.sidtime(jd);
-
-        // 3. Calculate RAMC (Right Ascension of MC)
-        // RAMC = GMST * 15 + Longitude
         const ramc = (gmst * 15 + lon + 360) % 360;
 
-        // 4. Calculate Ascendant (Tropical)
         const rad = Math.PI / 180;
         const ramcRad = ramc * rad;
         const epsRad = eps * rad;
         const latRad = lat * rad;
 
-        // Formula: tan(Asc) = cos(RAMC) / (-sin(RAMC) * cos(Eps) - tan(Lat) * sin(Eps))
-        // Note: signs depend on quadrant.
-        // Let's use:
-        // y = cos(RAMC)
-        // x = -sin(RAMC) * Math.cos(epsRad) - Math.tan(latRad) * Math.sin(epsRad)
-        // asc = atan2(y, x)
-
         const y = Math.cos(ramcRad);
-        const x = -Math.sin(ramcRad) * Math.cos(epsRad) - Math.tan(latRad) * Math.sin(epsRad);
+        const x =
+            -Math.sin(ramcRad) * Math.cos(epsRad) -
+            Math.tan(latRad) * Math.sin(epsRad);
 
         let ascTrop = Math.atan2(y, x) / rad;
         if (ascTrop < 0) ascTrop += 360;
 
-        // 5. Convert to Sidereal
-        // Get Ayanamsa
         const ayanamsa = swe.get_ayanamsa_ut(jd);
         ascendant = (ascTrop - ayanamsa + 360) % 360;
 
-        console.log("Manual Ascendant Calculation:", { gmst, ramc, eps, ascTrop, ayanamsa, ascendant });
-
+        console.log("Manual Ascendant Calculation:", {
+            gmst,
+            ramc,
+            eps,
+            ascTrop,
+            ayanamsa,
+            ascendant
+        });
     } catch (e) {
         console.error("Error calculating Ascendant manually:", e);
-        // Fallback to 0 if fails, but log error
         throw new Error("Failed to calculate Ascendant.");
     }
 
-    // Dummy houses array (Whole Sign)
-    // 1st House starts at 0 deg of Ascendant Sign
     const ascSignStart = Math.floor(ascendant / 30) * 30;
-    const houses = Array.from({ length: 12 }, (_, i) => (ascSignStart + i * 30) % 360);
+    const houses = Array.from(
+        { length: 12 },
+        (_, i) => (ascSignStart + i * 30) % 360
+    );
 
     return {
         ascendant,
